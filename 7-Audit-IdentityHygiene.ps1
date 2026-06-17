@@ -11,10 +11,12 @@
 
  TROUBLESHOOTING  -Verbose for tracing, -LogFile for a transcript. AD lookups
  use Get-ADUser/Get-ADGroup -Identity (SID or sAMAccountName) with per-principal
- error isolation.
+ error isolation. Add -NoRSAT to use ADSI ([adsisearcher]) instead of the RSAT
+ ActiveDirectory module for the same lookups - no module install required.
 
  USAGE
    .\7-Audit-IdentityHygiene.ps1 -SiteUrl https://sharepoint.contoso.com -ValidateAgainstAD -Verbose
+   .\7-Audit-IdentityHygiene.ps1 -SiteUrl https://sharepoint.contoso.com -ValidateAgainstAD -NoRSAT -Verbose
 ==============================================================================
 #>
 [CmdletBinding()]
@@ -23,6 +25,7 @@ param(
     [string]$GroupCsv     = ".\SP_GroupHygiene.csv",
     [string]$PrincipalCsv = ".\SP_PrincipalHygiene.csv",
     [switch]$ValidateAgainstAD,
+    [switch]$NoRSAT,
     [string]$LogFile
 )
 
@@ -46,6 +49,24 @@ function Get-AdStatus { param([string]$id)
     try { $g=Get-ADGroup -Identity $id -ErrorAction Stop; if ($g){ return 'ACTIVE' } } catch {}
     return 'ORPHANED'
 }
+function Get-AdStatusAdsi { param([string]$id)
+    # No-RSAT equivalent of Get-AdStatus, using [adsisearcher] (System.DirectoryServices).
+    $root=$null; $searchRoot=$null; $searcher=$null
+    try {
+        $root=[ADSI]'LDAP://RootDSE'; $defaultNC=$root.Properties['defaultNamingContext'][0]
+        $searchRoot=[ADSI]"LDAP://$defaultNC"
+        $searcher=[adsisearcher]"(&(|(objectCategory=user)(objectCategory=group))(sAMAccountName=$id))"
+        $searcher.SearchRoot=$searchRoot
+        $searcher.PropertiesToLoad.AddRange(@('objectCategory','userAccountControl')) | Out-Null
+        $hit=$searcher.FindOne()
+        if (-not $hit){ return 'ORPHANED' }
+        $cat="$($hit.Properties['objectcategory'][0])"
+        if ($cat -match '^CN=Group'){ return 'ACTIVE' }   # groups have no disabled state
+        $uac=[int]$hit.Properties['useraccountcontrol'][0]
+        return $(if ($uac -band 2){'DISABLED'}else{'ACTIVE'})
+    } catch { return 'ORPHANED' }
+    finally { if ($searcher){$searcher.Dispose()}; if ($searchRoot){$searchRoot.Dispose()}; if ($root){$root.Dispose()} }
+}
 
 $site=$null
 try {
@@ -54,8 +75,9 @@ try {
 
     $adOk=$false
     if ($ValidateAgainstAD){
-        if (Get-Module -ListAvailable -Name ActiveDirectory){ Import-Module ActiveDirectory -ErrorAction Stop; $adOk=$true; Write-Log "ActiveDirectory module loaded." }
-        else { Write-Log "ActiveDirectory module not found - skipping AD validation." WARN }
+        if ($NoRSAT) { $adOk=$true; Write-Log "Using ADSI ([adsisearcher]) for AD validation - no RSAT module required." }
+        elseif (Get-Module -ListAvailable -Name ActiveDirectory){ Import-Module ActiveDirectory -ErrorAction Stop; $adOk=$true; Write-Log "ActiveDirectory module loaded." }
+        else { Write-Log "ActiveDirectory module not found - skipping AD validation. Use -NoRSAT for a no-install fallback." WARN }
     }
 
     Start-SPAssignment -Global | Out-Null
@@ -87,7 +109,7 @@ try {
             $status='NotChecked'; $enabled=''
             $isDomain = $u.IsDomainGroup -or ($u.LoginName -match '\\' -or $u.LoginName -match '\|')
             if ($adOk -and $isDomain -and -not (Test-SkipPrincipal $u.LoginName)){
-                $status=Get-AdStatus (Resolve-Identity $u.LoginName)
+                $status = if ($NoRSAT) { Get-AdStatusAdsi (Resolve-Identity $u.LoginName) } else { Get-AdStatus (Resolve-Identity $u.LoginName) }
                 if ($status -eq 'DISABLED'){ $enabled=$false } elseif ($status -eq 'ACTIVE'){ $enabled=$true }
             }
             $prinRows.Add([PSCustomObject]@{Principal=$u.Name;LoginName=$u.LoginName;IsDomainGroup=$u.IsDomainGroup;IsSiteAdmin=$u.IsSiteAdmin;PrincipalStatus=$status;Enabled=$enabled})

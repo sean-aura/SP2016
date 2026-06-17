@@ -11,13 +11,15 @@
  This is a computed approximation of the platform's claims check - verify custom
  claim providers manually.
 
- REQUIRES (for AD groups): RSAT ActiveDirectory module.
+ REQUIRES (for AD groups): RSAT ActiveDirectory module, or use -NoRSAT for an
+ ADSI-based fallback ([adsisearcher]) that needs no module install.
  TROUBLESHOOTING  -Verbose for tracing, -LogFile for a transcript. Item scans
  are paged to avoid loading whole libraries.
 
  USAGE
    .\8-Get-EffectiveAccess.ps1 -SiteUrl https://sharepoint.contoso.com -LoginName "CONTOSO\jdoe" -Verbose
    .\8-Get-EffectiveAccess.ps1 -SiteUrl https://sharepoint.contoso.com -LoginName "i:0#.w|contoso\jdoe" -IncludeItems
+   .\8-Get-EffectiveAccess.ps1 -SiteUrl https://sharepoint.contoso.com -LoginName "CONTOSO\jdoe" -NoRSAT
 ==============================================================================
 #>
 [CmdletBinding()]
@@ -27,6 +29,7 @@ param(
     [string]$OutputCsv = ".\SP_EffectiveAccess.csv",
     [switch]$IncludeItems,
     [int]$ItemScanLimitPerList = 0,
+    [switch]$NoRSAT,
     [string]$LogFile
 )
 
@@ -40,6 +43,41 @@ function Initialize-SPSnapin {
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
 function Get-Norm { param([string]$s) if ([string]::IsNullOrEmpty($s)){return ''} if ($s -match '\|'){ $s=$s.Substring($s.IndexOf('|')+1) } return $s.ToLower() }
+
+# No-RSAT equivalent of Get-ADAccountAuthorizationGroup: returns all groups (recursively,
+# nested included) that the given sAMAccountName is a transitive member of, via the AD
+# LDAP_MATCHING_RULE_IN_CHAIN OID (1.2.840.113556.1.4.1941) - same result, no module install.
+function Get-AdsiAuthGroups { param([string]$sam)
+    $root=$null; $searchRoot=$null; $userSearcher=$null; $grpSearcher=$null; $grpResults=$null
+    $out = New-Object System.Collections.Generic.List[object]
+    try {
+        $root=[ADSI]'LDAP://RootDSE'; $defaultNC=$root.Properties['defaultNamingContext'][0]
+        $searchRoot=[ADSI]"LDAP://$defaultNC"
+        $userSearcher=[adsisearcher]"(&(objectCategory=person)(objectClass=user)(sAMAccountName=$sam))"
+        $userSearcher.SearchRoot=$searchRoot
+        $userSearcher.PropertiesToLoad.AddRange(@('distinguishedName')) | Out-Null
+        $uHit=$userSearcher.FindOne()
+        if (-not $uHit){ return $out }
+        $userDN=$uHit.Properties['distinguishedname'][0]
+
+        $grpSearcher=[adsisearcher]"(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:=$userDN))"
+        $grpSearcher.SearchRoot=$searchRoot
+        $grpSearcher.PageSize=1000
+        $grpSearcher.PropertiesToLoad.AddRange(@('sAMAccountName','objectSid')) | Out-Null
+        $grpResults=$grpSearcher.FindAll()
+        foreach ($g in $grpResults){
+            $samName = "$($g.Properties['samaccountname'][0])"
+            if ($samName){ $out.Add([PSCustomObject]@{SamAccountName=$samName; SID=$null}) }
+        }
+    } finally {
+        if ($grpResults){$grpResults.Dispose()}
+        if ($grpSearcher){$grpSearcher.Dispose()}
+        if ($userSearcher){$userSearcher.Dispose()}
+        if ($searchRoot){$searchRoot.Dispose()}
+        if ($root){$root.Dispose()}
+    }
+    return $out
+}
 
 $idset = New-Object System.Collections.Generic.HashSet[string]
 $spGroupNames = New-Object System.Collections.Generic.HashSet[string]
@@ -72,14 +110,21 @@ try {
     'c:0!.s|windows','authenticated users','c:0(.s|true','everyone' | ForEach-Object { [void]$idset.Add($_) }
 
     $sam = if ($LoginName -match '\\'){ ($LoginName -split '\\')[-1] } elseif ($LoginName -match '\|'){ ($LoginName.Substring($LoginName.IndexOf('|')+1) -split '\\')[-1] } else { $LoginName }
-    if (Get-Module -ListAvailable -Name ActiveDirectory){
+    if ($NoRSAT) {
+        try {
+            $g = Get-AdsiAuthGroups -sam $sam
+            foreach ($x in $g){ if ($x.SamAccountName){[void]$idset.Add($x.SamAccountName.ToLower())} }
+            Write-Log "Resolved $($g.Count) AD group(s) for $sam via ADSI (no RSAT)." VERBOSE
+        } catch { Write-Log "ADSI group resolution failed for '$sam': $($_.Exception.Message)" WARN }
+    }
+    elseif (Get-Module -ListAvailable -Name ActiveDirectory){
         Import-Module ActiveDirectory -ErrorAction Stop
         try {
             $g = Get-ADAccountAuthorizationGroup -Identity $sam -ErrorAction Stop
             foreach ($x in $g){ if ($x.SamAccountName){[void]$idset.Add($x.SamAccountName.ToLower())}; if ($x.SID){[void]$idset.Add($x.SID.Value.ToLower())} }
             Write-Log "Resolved $($g.Count) AD group(s) for $sam." VERBOSE
         } catch { Write-Log "AD group resolution failed for '$sam': $($_.Exception.Message)" WARN }
-    } else { Write-Log "ActiveDirectory module not found - AD-group-based access will be missed." WARN }
+    } else { Write-Log "ActiveDirectory module not found - AD-group-based access will be missed. Use -NoRSAT for a no-install fallback." WARN }
 
     Start-SPAssignment -Global | Out-Null
     Write-Log "Opening site collection: $SiteUrl"

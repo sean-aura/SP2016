@@ -83,8 +83,13 @@ try {
                     if ($list.AllowEveryoneViewItems){
                         $results.Add([PSCustomObject]@{Finding='ListAnonymous';Detail='AllowEveryoneViewItems';Scope='List/Library';ObjectUrl=$lUrl;WebUrl=$web.Url;Principal='(anonymous)';LoginName='';Permissions='Anonymous may view items'})
                     }
-                    # Precise anonymous mask check (borrowed idea): non-empty mask = anon rights granted
-                    if ($list.AnonymousPermMask64 -ne [Microsoft.SharePoint.SPBasePermissions]::EmptyMask){
+                    # Real anonymous content access requires ViewListItems in the mask. A non-empty mask alone is
+                    # NOT sufficient: every list carries AnonymousSearchAccessWebLists by default (search-crawl
+                    # scoping only, no content access) even when anonymous access was never enabled via the UI.
+                    # Checking "-ne EmptyMask" alone would false-positive on essentially every list in the farm.
+                    # Source: SPList.AnonymousPermMask64 docs + community confirmation that this flag is present
+                    # by default and does not by itself grant content access.
+                    if (($list.AnonymousPermMask64 -band [Microsoft.SharePoint.SPBasePermissions]::ViewListItems) -eq [Microsoft.SharePoint.SPBasePermissions]::ViewListItems){
                         $results.Add([PSCustomObject]@{Finding='ListAnonymousMask';Detail=$list.AnonymousPermMask64;Scope='List/Library';ObjectUrl=$lUrl;WebUrl=$web.Url;Principal='(anonymous)';LoginName='';Permissions="AnonymousPermMask64=$($list.AnonymousPermMask64)"})
                     }
                     if ($list.HasUniqueRoleAssignments){ Add-BroadFindings -Securable $list -Scope 'List/Library' -ObjectUrl $lUrl -WebUrl $web.Url }

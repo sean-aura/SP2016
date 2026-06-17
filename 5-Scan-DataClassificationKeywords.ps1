@@ -10,6 +10,12 @@
  permissions and whether it is stale; can scan the recycle bin; -UseSearch does
  full-text inside documents via the Search service.
 
+ DEFAULT KEYWORDS cover the full NZ Government Security Classification System
+ (PSR 2022): all six classification levels (IN-CONFIDENCE, SENSITIVE, RESTRICTED,
+ CONFIDENTIAL, SECRET, TOP SECRET), standard endorsement markings (NZEO, CABINET,
+ BUDGET, LEGAL PRIVILEGE, EMBARGOED, etc.), and common PII/credential terms.
+ Override with -Keywords to use a custom list instead.
+
  TROUBLESHOOTING  -Verbose for tracing, -LogFile for a transcript. Item scans
  are paged (2000/batch) to avoid loading whole libraries into memory.
 
@@ -21,9 +27,32 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)] [string]$SiteUrl,
-    [string[]]$Keywords = @('Restricted','Confidential','Secret','Top Secret','Classified',
-                            'Sensitive','Protected','PII','Internal Only','NDA','Privileged',
-                            'HIPAA','PCI','SSN','Password','Credential'),
+    [string[]]$Keywords = @(
+                            # ---- NZ Government Security Classification System (PSR 2022) ----
+                            # Policy and privacy classifications
+                            'IN-CONFIDENCE','In Confidence',
+                            'SENSITIVE',
+                            # National security classifications
+                            'RESTRICTED','CONFIDENTIAL','SECRET','TOP SECRET',
+                            # Common endorsement markings
+                            'NZEO','NEW ZEALAND EYES ONLY',
+                            'ACCOUNTABLE MATERIAL',
+                            'CABINET','BUDGET','APPOINTMENTS','HONOURS',
+                            'LEGAL PRIVILEGE','LEGAL-PRIVILEGE',
+                            'EMBARGOED','EMBARGOED FOR RELEASE',
+                            'COMMERCIAL','EVALUATIVE','MEDICAL','STAFF',
+                            'REL TO','RELEASABLE TO',
+                            # ---- Generic / international classification terms ----
+                            'Classified','Protected','Privileged',
+                            # ---- PII / privacy / regulatory ----
+                            'PII','Personal Information','Privacy Act',
+                            'Health Information','Medical Record',
+                            'NDA','Commercial In Confidence',
+                            # ---- Credentials / security ----
+                            'Password','Credential','Secret Key','API Key',
+                            # ---- Legacy default terms retained ----
+                            'Internal Only','HIPAA','PCI','SSN'
+                            ),
     [string]$OutputCsv = ".\SP_Classification_Scan.csv",
     [switch]$ScanColumnValues,
     [switch]$DataPatterns,
@@ -43,7 +72,18 @@ function Initialize-SPSnapin {
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
-$kwPattern = ($Keywords | ForEach-Object { [regex]::Escape($_) }) -join '|'
+$kwPattern = ($Keywords | ForEach-Object { '(?<![A-Za-z0-9])' + [regex]::Escape($_) + '(?![A-Za-z0-9])' }) -join '|'
+# Boundary notes:
+# Several NZ classification keywords (STAFF, BUDGET, SECRET, MEDICAL, COMMERCIAL, EVALUATIVE) are
+# common English word fragments. Standard regex \b does not help here because \b treats underscore
+# as a word character, so "Top_Secret_Plan.docx" would NOT match SECRET with \b boundaries - exactly
+# the opposite of what's needed for SharePoint's typical underscore/hyphen filename conventions.
+# Instead each keyword is wrapped in negative lookaround requiring the character immediately before
+# and after to NOT be a letter or digit. This correctly:
+#   - MATCHES  "Top_Secret_Plan.docx", "budget-2025-final.xlsx", "IN-CONFIDENCE_Cabinet.docx"
+#   - REJECTS  "Staffing_Plan.docx" (STAFF), "secretary_notes.docx" (SECRET), "medicalert.pdf" (MEDICAL)
+# Multi-word phrases like 'TOP SECRET' still match as a literal phrase since the space is preserved
+# inside the escaped keyword and only the outer edges are boundary-checked.
 # Pattern notes:
 # SSN regex matches NNN-NN-NNNN - may produce false positives (phone extensions, dates, etc.)
 # CardNumber regex matches 13-16 digits with optional spaces/dashes - intentionally broad;

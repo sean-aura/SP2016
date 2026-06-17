@@ -20,7 +20,7 @@ required given the code is read-only, but reasonable for a formal audit.
 ## Prerequisites
 - Run **on a farm server** in the **SharePoint 2016 Management Shell**.
 - Site-collection / shell admin for 1, 2, 3, 5, 7, 8, 9; **farm admin** for 4 and 10.
-- **RSAT ActiveDirectory module** for the AD-aware parts (6, 7 `-ValidateAgainstAD`, 8).
+- **RSAT ActiveDirectory module** for the AD-aware parts (6, 7 `-ValidateAgainstAD`, 8) — all three also support a no-install `-NoRSAT` fallback, see below.
 - Run off-hours; cap big scans with `-ItemScanLimitPerList`.
 
 ## Scripts
@@ -32,9 +32,9 @@ required given the code is read-only, but reasonable for a formal audit.
 | 3 | `3-Audit-VersioningAndDraftSecurity.ps1` | Draft/minor-version visibility, approval, item read/write security | site admin |
 | 4 | `4-Audit-Configuration.ps1` | Web-app/site config: auth, anonymous, TLS, policies, BrowserFileHandling, lockdown, user solutions, auditing | **farm admin** |
 | 5 | `5-Scan-DataClassificationKeywords.ps1` | Restricted/Confidential content; regex (SSN/card), recycle bin, stale flag | site admin (+Search for `-UseSearch`) |
-| 6 | `6-Expand-ADGroups.ps1` | Recursively expands AD groups from script 1's CSV; flags disabled members | RSAT AD (no SharePoint) |
-| 7 | `7-Audit-IdentityHygiene.ps1` | SP group self-join/owner risks; orphaned/disabled principals | site admin (+RSAT for `-ValidateAgainstAD`) |
-| 8 | `8-Get-EffectiveAccess.ps1` | What ONE user can actually reach (assigned vs effective) | site admin + RSAT AD |
+| 6 | `6-Expand-ADGroups.ps1` | Recursively expands AD groups from script 1's CSV; flags disabled members | RSAT AD, or `-NoRSAT` (no SharePoint) |
+| 7 | `7-Audit-IdentityHygiene.ps1` | SP group self-join/owner risks; orphaned/disabled principals | site admin (+RSAT or `-NoRSAT` for `-ValidateAgainstAD`) |
+| 8 | `8-Get-EffectiveAccess.ps1` | What ONE user can actually reach (assigned vs effective) | site admin + RSAT AD, or `-NoRSAT` |
 | 9 | `9-Export-AuditLogEvents.ps1` | Behavioural audit: permission changes/deletes from the audit log | site admin + auditing enabled |
 | 10 | `10-Audit-FarmSecurity.ps1` | Footprint (all web apps/DBs/sites), managed accounts, AV, federation, Secure Store, add-ins | **farm admin** |
 
@@ -58,13 +58,41 @@ required given the code is read-only, but reasonable for a formal audit.
 ### Script 5 — Data Classification
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `-Keywords <string[]>` | 16 built-in terms | Override keyword list |
+| `-Keywords <string[]>` | NZ PSR 2022 classification labels + PII/credential terms (see script header) | Override keyword list entirely — pass your own array to replace the defaults |
 | `-ScanColumnValues` | off | Scan all non-hidden column values (slower) |
 | `-DataPatterns` | off | Add SSN and card-number regex matching |
 | `-IncludeRecycleBin` | off | Include per-web recycle bin |
 | `-StaleDays <n>` | 730 | Flag items not modified in n days |
 | `-ItemScanLimitPerList <n>` | 0 (unlimited) | Cap item scan per list |
 | `-UseSearch` | off | Full-text search via the Search service (needs a crawl; results are paged automatically) |
+
+The default keyword list covers the complete **NZ Government Security Classification System (PSR 2022)**:
+
+| Category | Keywords |
+|----------|----------|
+| Policy/privacy classifications | `IN-CONFIDENCE`, `SENSITIVE` |
+| National security classifications | `RESTRICTED`, `CONFIDENTIAL`, `SECRET`, `TOP SECRET` |
+| Endorsement markings | `NZEO`, `NEW ZEALAND EYES ONLY`, `ACCOUNTABLE MATERIAL`, `CABINET`, `BUDGET`, `APPOINTMENTS`, `HONOURS`, `LEGAL PRIVILEGE`, `EMBARGOED`, `EMBARGOED FOR RELEASE`, `COMMERCIAL`, `EVALUATIVE`, `MEDICAL`, `STAFF`, `REL TO`, `RELEASABLE TO` |
+| PII / privacy / regulatory | `PII`, `Personal Information`, `Privacy Act`, `Health Information`, `Medical Record`, `NDA`, `Commercial In Confidence` |
+| Credentials / security | `Password`, `Credential`, `Secret Key`, `API Key` |
+| Retained legacy terms | `Internal Only`, `HIPAA`, `PCI`, `SSN` |
+
+Source: [NZ PSR Classification System](https://www.protectivesecurity.govt.nz/classification/overview) (protectivesecurity.govt.nz, 2022 policy).
+
+### Script 6 — Expand AD Groups
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-InputCsv <path>` | **required** | CSV from script 1/2 containing AD-group rows to expand |
+| `-OutputCsv <path>` | `.\SP_AD_Expanded.csv` | Output file |
+| `-NoRSAT` | off | Use ADSI (`[adsisearcher]`) instead of the RSAT ActiveDirectory module — no module install required |
+
+### Script 7 — Identity Hygiene
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-ValidateAgainstAD` | off | Cross-check principals against AD to flag orphaned/disabled accounts |
+| `-NoRSAT` | off | When `-ValidateAgainstAD` is set, use ADSI instead of the RSAT module — no install required |
+| `-GroupCsv <path>` | `.\SP_GroupHygiene.csv` | SP group self-join/owner findings output file |
+| `-PrincipalCsv <path>` | `.\SP_PrincipalHygiene.csv` | Orphaned/disabled principal findings output file |
 
 ### Script 8 — Effective Access
 | Parameter | Default | Purpose |
@@ -99,6 +127,19 @@ Script 4 reports the site's `AuditFlags`. If that comes back as `None`, script 9
 
 **Script 6 depends on what script 1 captured**
 Script 6 expands AD groups found in script 1's CSV. If script 1 was run without `-IncludeFolders` or `-IncludeItems`, any AD group with access only at folder or item level will not appear in the CSV and script 6 will not expand it. Run script 1 with the broadest scope your time budget allows before handing off to script 6.
+
+**No RSAT? Scripts 6, 7, and 8 all have a fallback — no `net use` workaround needed**
+If `RSAT-AD-PowerShell` cannot be installed (locked-down server, no admin rights to add Windows Features, no WSUS/internet path to the feature), add `-NoRSAT` to any of the three AD-aware scripts:
+```powershell
+.\6-Expand-ADGroups.ps1     -InputCsv .\SP_RBAC_Audit.csv -NoRSAT -Verbose
+.\7-Audit-IdentityHygiene.ps1 -SiteUrl https://sharepoint.contoso.com -ValidateAgainstAD -NoRSAT -Verbose
+.\8-Get-EffectiveAccess.ps1   -SiteUrl https://sharepoint.contoso.com -LoginName "CONTOSO\jdoe" -NoRSAT
+```
+All three use `[adsisearcher]` (`System.DirectoryServices`), which ships with every Windows install — no module to add. Group membership and reverse (user-to-groups) lookups both use the AD `LDAP_MATCHING_RULE_IN_CHAIN` filter (OID `1.2.840.113556.1.4.1941`), the same mechanism `Get-ADGroupMember -Recursive` / `Get-ADAccountAuthorizationGroup` use internally, so results are equivalent. `net use` is unrelated — it maps drives/network shares, not AD group membership, and `net group`/`net group /domain` only return direct members (no nested-group expansion), so neither is a substitute. `-NoRSAT` is the correct workaround.
+One difference worth knowing: `-NoRSAT` mode resolves `DisplayName`/`SamAccountName`/`Enabled`/group-membership directly from the LDAP query, so it doesn't need RSAT's follow-up `Get-ADUser`/`Get-ADGroup` calls — output columns are identical, just populated by a different path.
+
+**How these scripts authenticate — there's no password prompt**
+None of the ten scripts accept a `-Credential` parameter or call `Get-Credential`. They all connect using **Windows Integrated Authentication of whatever account is already running the PowerShell session** — the same identity you used to log into the farm server (or RDP session) and open the SharePoint 2016 Management Shell. SharePoint's snap-in (`Microsoft.SharePoint.PowerShell`) and AD's RSAT/ADSI calls both ride on that same Kerberos/NTLM ticket; there's no separate sign-in step and no password is ever typed into or stored by these scripts. Practically this means: run the SharePoint Management Shell "as Administrator" using an account that already has the access level the script needs (site admin for most, farm admin for scripts 4 and 10, and an AD-readable account for scripts 6, 7, and 8) — log in as that account first, then launch PowerShell from that same session.
 
 **Script 8 is an approximation**
 It resolves the target account's group memberships via a global catalog query at the time of the run. Access granted through claim providers other than Windows claims will not be reflected. Treat the output as "likely access" and verify manually for any custom claim provider environments.
@@ -162,8 +203,8 @@ For busy farms, run script 9 with a narrower window first to gauge volume:
 | CSV exported with 0 rows | Wrong scope, no unique perms at chosen level, or a silent filter | Add `-Verbose` to see per-web/list tracing; check the non-fatal error count at the end |
 | Script 9 very slow or hangs | Too many audit entries for the date range | Lower `-Days` first; add `-MaxEntries 100000` as a hard cap |
 | Script 5 `-UseSearch` returns nothing | Search service not running or content not crawled | Verify the Search Service Application is started and a crawl has run |
-| Script 6 `Could not expand` warnings | RSAT not installed, or group is in a different domain/trust | Install `RSAT-AD-PowerShell`; check forest trust if cross-domain |
-| Script 8 misses AD-group-based access | RSAT module missing | Install `RSAT-AD-PowerShell` on the farm server |
+| Script 6 `Could not expand` warnings | RSAT not installed, or group is in a different domain/trust | Install `RSAT-AD-PowerShell`, or run with `-NoRSAT` (no install needed); check forest trust if cross-domain |
+| Script 8 misses AD-group-based access | RSAT module missing | Install `RSAT-AD-PowerShell` on the farm server, or run with `-NoRSAT` (no install needed) |
 | `GetEntries failed` | Date range too large for available memory | Use `-Days 30` or narrower; consider running from a server with more RAM |
 
 ## Drift detection (baseline + diff)
@@ -186,10 +227,15 @@ accordingly (encrypt at rest, restrict access, delete when done).
 - Script 8 computes effective access from the user's resolved principal set; it approximates the platform's claims evaluation — verify results for environments using custom claim providers.
 - `-ExpandGroups` in script 1 expands SP group members one level only (uses `SPGroup.Users`). Nested SP groups within a SP group are not recursively expanded. AD groups within SP groups are handled by script 6 (`-Recursive`).
 
+**Anonymous access detection (script 2)**
+- `ListAnonymousMask` checks `AnonymousPermMask64 & ViewListItems`, not "mask is non-empty." Every list carries `AnonymousSearchAccessWebLists` by default purely for search-crawl scoping, with no content access granted — checking for a non-empty mask alone would flag this finding on essentially every list in the farm. The current check only fires when anonymous users can actually view content.
+- `AllowEveryoneViewItems` (separate finding, `ListAnonymous`) is unrelated to the site-level anonymous setting: it only affects direct-URL access to documents/attachments and works even for authenticated users browsing straight to a file link, bypassing the normal list view permission check. Treat the two findings independently.
+
 **Feature GUIDs**
 - The `ViewFormPagesLockDown` GUID (`7c637b23-06c4-472d-9a9a-7c175762c5c4`) in script 4 is the standard SP2016 value (Scope=Site, confirmed against the SP2016 feature manifest). Verify on your farm: `Get-SPFeature -Site <url> | Where-Object { $_.DisplayName -like '*Lockdown*' }`. If the feature has a different GUID in your farm's feature store (e.g. from a non-standard deployment), update the GUID in `4-Audit-Configuration.ps1`.
 
 **Data pattern matching (script 5)**
+- Keywords are matched with boundary anchoring, not plain substring search: `STAFF`, `BUDGET`, `SECRET`, `MEDICAL`, `COMMERCIAL`, and similar common-word fragments will match `Top_Secret_Plan.docx` or `budget-2025.xlsx` (boundary = underscore/hyphen/space/start/end) but will not false-positive on `Staffing_Plan.docx`, `secretary_notes.docx`, or `medicalert.pdf`. If you supply your own `-Keywords`, the same boundary rule applies automatically. This only affects the metadata-scan path; `-UseSearch` sends keywords to SharePoint's Search service as a KQL query, which already does word-based matching and was never affected.
 - SSN regex (`\d{3}-\d{2}-\d{4}`) and card-number regex (13–16 digits with optional separators) match on file names and metadata only, not file contents — use `-UseSearch` for content-level scanning.
 - Both patterns can produce false positives: the SSN pattern matches any NNN-NN-NNNN number (dates, phone extensions, item codes); the card pattern is intentionally broad and has no Luhn validation.
 - `-UseSearch` pages through all Search results automatically, but `TotalRows` from the Search service may be capped at a round number (500 or 1000) by the Results Provider. The script logs a warning if this is detected. For exhaustive coverage use the metadata scan (without `-UseSearch`).
