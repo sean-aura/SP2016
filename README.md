@@ -24,6 +24,7 @@ required given the code is read-only, but reasonable for a formal audit.
 - Run off-hours; cap big scans with `-ItemScanLimitPerList`.
 
 ## Scripts
+
 | # | Script | Covers | Needs |
 |---|--------|--------|-------|
 | 1 | `1-Audit-Permissions.ps1` | RBAC at web/list/**folder**/item; flags broken inheritance and AD groups | site admin |
@@ -35,29 +36,88 @@ required given the code is read-only, but reasonable for a formal audit.
 | 7 | `7-Audit-IdentityHygiene.ps1` | SP group self-join/owner risks; orphaned/disabled principals | site admin (+RSAT for `-ValidateAgainstAD`) |
 | 8 | `8-Get-EffectiveAccess.ps1` | What ONE user can actually reach (assigned vs effective) | site admin + RSAT AD |
 | 9 | `9-Export-AuditLogEvents.ps1` | Behavioural audit: permission changes/deletes from the audit log | site admin + auditing enabled |
-| 10| `10-Audit-FarmSecurity.ps1` | Footprint (all web apps/DBs/sites), managed accounts, AV, federation, Secure Store, add-ins | **farm admin** |
+| 10 | `10-Audit-FarmSecurity.ps1` | Footprint (all web apps/DBs/sites), managed accounts, AV, federation, Secure Store, add-ins | **farm admin** |
+
+## Key parameters
+
+### Common across all scripts
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-Verbose` | off | Per-web/per-list tracing to the console |
+| `-LogFile <path>` | off | Full transcript to a file (uses `Start-Transcript`) |
+
+### Script 1 — Permissions
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-IncludeFolders` | off | Scan folders with unique permissions (fast) |
+| `-IncludeItems` | off | Scan items with unique permissions (use with caution on large libraries) |
+| `-ItemScanLimitPerList <n>` | 0 (unlimited) | Stop item scan after n items per list |
+| `-ExpandGroups` | off | Inline-expand SP group members into additional rows |
+| `-OutputCsv <path>` | `.\SP_RBAC_Audit.csv` | Output file |
+
+### Script 5 — Data Classification
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-Keywords <string[]>` | 16 built-in terms | Override keyword list |
+| `-ScanColumnValues` | off | Scan all non-hidden column values (slower) |
+| `-DataPatterns` | off | Add SSN and card-number regex matching |
+| `-IncludeRecycleBin` | off | Include per-web recycle bin |
+| `-StaleDays <n>` | 730 | Flag items not modified in n days |
+| `-ItemScanLimitPerList <n>` | 0 (unlimited) | Cap item scan per list |
+| `-UseSearch` | off | Full-text search via the Search service (needs a crawl; results are paged automatically) |
+
+### Script 8 — Effective Access
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-LoginName <string>` | **required** | Account to check (DOMAIN\sam or claim string) |
+| `-IncludeItems` | off | Descend into items/folders with unique permissions |
+| `-ItemScanLimitPerList <n>` | 0 (unlimited) | Cap per list |
+
+### Script 9 — Audit Log
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-Days <n>` | 90 | How many days back to query |
+| `-IncludeViews` | off | Include view/open events (can be very high volume) |
+| `-MaxEntries <n>` | 0 (no cap) | Hard cap on entries processed; script warns if the cap is hit — lower `-Days` or raise this value on busy farms |
+
+### Script 10 — Farm Security
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `-ContextSiteUrl <url>` | CA site | Site used to establish the Secure Store service context |
+| `-IncludeAddins` | off | Farm-wide add-in scan (crawls every web — slow) |
 
 ## Suggested run order
+
 ```powershell
 $site = "https://sharepoint.contoso.com"
 
-# Scope first - confirm this site collection is the whole footprint
+# Scope first — confirm this site collection is the whole footprint
 .\10-Audit-FarmSecurity.ps1
 
 # Core access picture
-.\1-Audit-Permissions.ps1                -SiteUrl $site -ExpandGroups -IncludeFolders
+.\1-Audit-Permissions.ps1                -SiteUrl $site -ExpandGroups -IncludeFolders -Verbose
 .\6-Expand-ADGroups.ps1                  -InputCsv .\SP_RBAC_Audit.csv      # turns AD groups into people
-.\2-Audit-BroadAndAnonymousAccess.ps1    -SiteUrl $site
-.\7-Audit-IdentityHygiene.ps1            -SiteUrl $site -ValidateAgainstAD
+.\2-Audit-BroadAndAnonymousAccess.ps1    -SiteUrl $site -Verbose
+.\7-Audit-IdentityHygiene.ps1            -SiteUrl $site -ValidateAgainstAD -Verbose
 
 # Configuration + content + behaviour
-.\4-Audit-Configuration.ps1              -SiteUrl $site
-.\3-Audit-VersioningAndDraftSecurity.ps1 -SiteUrl $site
-.\5-Scan-DataClassificationKeywords.ps1  -SiteUrl $site -ScanColumnValues -DataPatterns -IncludeRecycleBin
-.\9-Export-AuditLogEvents.ps1            -SiteUrl $site -Days 90
+.\4-Audit-Configuration.ps1              -SiteUrl $site -Verbose
+.\3-Audit-VersioningAndDraftSecurity.ps1 -SiteUrl $site -Verbose
+.\5-Scan-DataClassificationKeywords.ps1  -SiteUrl $site -ScanColumnValues -DataPatterns -IncludeRecycleBin -Verbose
+.\9-Export-AuditLogEvents.ps1            -SiteUrl $site -Days 90 -Verbose
 
 # Spot-check a specific account
-.\8-Get-EffectiveAccess.ps1              -SiteUrl $site -LoginName "CONTOSO\jdoe" -IncludeFolders
+.\8-Get-EffectiveAccess.ps1              -SiteUrl $site -LoginName "CONTOSO\jdoe" -IncludeFolders -Verbose
+```
+
+For large farms or libraries, add `-LogFile .\run.log` to any script to capture the full transcript, and use `-ItemScanLimitPerList 5000` to cap item scans.
+
+For busy farms, run script 9 with a narrower window first to gauge volume:
+
+```powershell
+.\9-Export-AuditLogEvents.ps1 -SiteUrl $site -Days 7 -Verbose
+# If entry count is manageable, extend -Days; otherwise use -MaxEntries to cap
+.\9-Export-AuditLogEvents.ps1 -SiteUrl $site -Days 90 -MaxEntries 200000
 ```
 
 ## Turning the CSVs into a risk picture
@@ -70,6 +130,18 @@ $site = "https://sharepoint.contoso.com"
 5. **Script 3** catches draft leaks and over-readable "private" lists.
 6. **Script 4 + 10** = configuration/farm baseline (filter Script 4 to non-blank `Risk`).
 7. **Script 9** shows what was actually done (permission changes, deletes).
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `SharePoint snap-in not registered` | Not running in Management Shell | Run from **SharePoint 2016 Management Shell**, not plain PowerShell |
+| CSV exported with 0 rows | Wrong scope, no unique perms at chosen level, or a silent filter | Add `-Verbose` to see per-web/list tracing; check the non-fatal error count at the end |
+| Script 9 very slow or hangs | Too many audit entries for the date range | Lower `-Days` first; add `-MaxEntries 100000` as a hard cap |
+| Script 5 `-UseSearch` returns nothing | Search service not running or content not crawled | Verify the Search Service Application is started and a crawl has run |
+| Script 6 `Could not expand` warnings | RSAT not installed, or group is in a different domain/trust | Install `RSAT-AD-PowerShell`; check forest trust if cross-domain |
+| Script 8 misses AD-group-based access | RSAT module missing | Install `RSAT-AD-PowerShell` on the farm server |
+| `GetEntries failed` | Date range too large for available memory | Use `-Days 30` or narrower; consider running from a server with more RAM |
 
 ## Drift detection (baseline + diff)
 These are point-in-time snapshots; the real value is re-running and diffing:
@@ -92,8 +164,11 @@ accordingly (encrypt at rest, restrict access, delete when done).
   the SP object model in a reliable way — review those in Central Admin / IIS.
 - Regex data-pattern matching (script 5) runs on names/metadata, not file
   contents; use `-UseSearch` for keywords inside documents (needs a crawl).
+- Script 5 `-UseSearch` pages automatically through all search results; each
+  page is a new `KeywordQuery` call so avoid very broad keyword lists on large
+  farms (use the narrowest useful keyword set).
 
-## Reference scripts borrowed from (on-prem)
+## Reference scripts
 - SharePoint Diary — SharePoint 2013/2016 Site Collection Permission Report:
   https://www.sharepointdiary.com/2016/02/sharepoint-site-collection-permission-report-powershell-script.html
 - SharePoint Diary — Users & Groups Security Report by Permission Levels:

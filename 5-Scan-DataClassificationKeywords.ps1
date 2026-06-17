@@ -62,17 +62,22 @@ try {
     $site=Get-SPSite $SiteUrl -ErrorAction Stop
 
     if ($UseSearch){
-        Write-Log "Running full-text Search query..."
+        Write-Log "Running full-text Search query (paged)..."
         try {
             $queryText=($Keywords | ForEach-Object { '"'+$_+'"' }) -join ' OR '
-            $kq=New-Object Microsoft.Office.Server.Search.Query.KeywordQuery($site)
-            $kq.QueryText=$queryText; $kq.RowLimit=500; $kq.TrimDuplicates=$false
-            'Title','Path','Author','LastModifiedTime' | ForEach-Object { [void]$kq.SelectProperties.Add($_) }
             $exec=New-Object Microsoft.Office.Server.Search.Query.SearchExecutor
-            $rel=$exec.ExecuteQuery($kq).Item([Microsoft.Office.Server.Search.Query.ResultType]::RelevantResults)
-            foreach ($row in $rel.Table.Rows){
-                $results.Add([PSCustomObject]@{Source='Search';List='';ItemUrl=$row['Path'];Title=$row['Title'];LastModified=$row['LastModifiedTime'];Stale='';UniquePerms='';Matches="full-text: $queryText"})
-            }
+            $pageSize=500; $startRow=0; $totalRows=[int]::MaxValue
+            do {
+                $kq=New-Object Microsoft.Office.Server.Search.Query.KeywordQuery($site)
+                $kq.QueryText=$queryText; $kq.RowLimit=$pageSize; $kq.StartRow=$startRow; $kq.TrimDuplicates=$false
+                'Title','Path','Author','LastModifiedTime' | ForEach-Object { [void]$kq.SelectProperties.Add($_) }
+                $rel=$exec.ExecuteQuery($kq).Item([Microsoft.Office.Server.Search.Query.ResultType]::RelevantResults)
+                if ($startRow -eq 0){ $totalRows=[int]$rel.TotalRows; Write-Log "Search: $totalRows total result(s)." VERBOSE }
+                foreach ($row in $rel.Table.Rows){
+                    $results.Add([PSCustomObject]@{Source='Search';List='';ItemUrl=$row['Path'];Title=$row['Title'];LastModified=$row['LastModifiedTime'];Stale='';UniquePerms='';Matches="full-text: $queryText"})
+                }
+                $startRow+=$pageSize
+            } while ($startRow -lt $totalRows)
         } catch { Write-Log "Search query failed (is the Search service running/crawled?): $($_.Exception.Message)" WARN }
     }
     else {

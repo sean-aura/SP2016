@@ -8,11 +8,14 @@
  PURPOSE  Behavioural audit: permission changes, deletes, (optionally) views.
  PREREQUISITES  Auditing must have been enabled (see script 4 AuditFlags).
  TROUBLESHOOTING  -Verbose for tracing, -LogFile for a transcript. Large date
- windows can return a lot of data; narrow -Days if GetEntries is slow.
+ windows can return a lot of data; narrow -Days or set -MaxEntries if GetEntries
+ is slow. GetEntries loads all matching rows into memory before filtering, so on
+ busy farms with -IncludeViews use a short -Days window and set -MaxEntries.
 
  USAGE
    .\9-Export-AuditLogEvents.ps1 -SiteUrl https://sharepoint.contoso.com -Days 90 -Verbose
    .\9-Export-AuditLogEvents.ps1 -SiteUrl https://sharepoint.contoso.com -Days 30 -IncludeViews
+   .\9-Export-AuditLogEvents.ps1 -SiteUrl https://sharepoint.contoso.com -Days 7 -MaxEntries 50000
 ==============================================================================
 #>
 [CmdletBinding()]
@@ -20,6 +23,7 @@ param(
     [Parameter(Mandatory=$true)] [string]$SiteUrl,
     [int]$Days = 90,
     [switch]$IncludeViews,
+    [int]$MaxEntries = 0,           # 0 = no cap; set e.g. 100000 on busy farms to avoid OOM
     [string]$OutputCsv = ".\SP_AuditLogEvents.csv",
     [string]$LogFile
 )
@@ -63,12 +67,18 @@ try {
     try { $entries=$site.Audit.GetEntries($query) }
     catch { throw "GetEntries failed (try a smaller -Days window): $($_.Exception.Message)" }
     Write-Log "Retrieved $($entries.Count) raw entries; filtering..." VERBOSE
+    if ($MaxEntries -gt 0 -and $entries.Count -ge $MaxEntries){
+        Write-Log "WARNING: Entry count ($($entries.Count)) has hit -MaxEntries cap ($MaxEntries). Results are TRUNCATED - use a shorter -Days window or raise -MaxEntries." WARN
+    }
 
+    $processed=0
     foreach ($e in $entries){
+        if ($MaxEntries -gt 0 -and $processed -ge $MaxEntries){ break }
         try {
             $evt="$($e.Event)"
             $isSec=$securityEvents -contains $evt
             if (-not $isSec -and -not $IncludeViews){ continue }
+            $processed++
             $results.Add([PSCustomObject]@{
                 Occurred=$e.Occurred; Event=$evt; Category=$(if ($isSec){'Security'}else{'Access/Other'})
                 User=Resolve-AuditUser $site.RootWeb $e.UserId; ItemType=$e.ItemType; Location=$e.DocLocation
