@@ -23,24 +23,39 @@ param(
     [string]$LogFile
 )
 
+# ErrorActionPreference=Continue: a failed check is logged and skipped rather than
+# aborting the whole run. $script:Errors tallies those non-fatal skips.
 $ErrorActionPreference='Continue'; $script:Errors=0; $script:Start=Get-Date
+# --- Shared helpers (identical across every script in this toolkit) ---
+# Write-Log: timestamped, leveled console output. Level 'ERROR' also increments the
+# non-fatal error counter shown in the final summary; 'VERBOSE' prints only with -Verbose.
 function Write-Log { param([string]$Message,[ValidateSet('INFO','OK','WARN','ERROR','VERBOSE')][string]$Level='INFO')
     $ts=(Get-Date).ToString('HH:mm:ss')
     switch ($Level){'VERBOSE'{Write-Verbose "[$ts] $Message"}'WARN'{Write-Warning "[$ts] $Message"}'ERROR'{Write-Host "[$ts] ERROR: $Message" -ForegroundColor Red;$script:Errors++}'OK'{Write-Host "[$ts] $Message" -ForegroundColor Green}default{Write-Host "[$ts] $Message" -ForegroundColor Cyan}} }
+# Initialize-SPSnapin: makes the SharePoint server-side cmdlets available by loading the
+# Microsoft.SharePoint.PowerShell snap-in if it is not already loaded (it is pre-loaded in
+# the SharePoint 2016 Management Shell). Loading a snap-in is read-only - it only exposes
+# cmdlets to the session, it does not alter the farm.
 function Initialize-SPSnapin {
     if (Get-Command Get-SPSite -ErrorAction SilentlyContinue){return}
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
 $findings = New-Object System.Collections.Generic.List[object]
+# Add-F: append one finding row. $Risk is left blank for purely informational settings and
+# filled in only when the value represents a hardening concern - so filtering the CSV to
+# rows where Risk is non-blank gives the prioritised list (see the closing log message).
 function Add-F { param($Area,$Setting,$Value,$Risk='') $findings.Add([PSCustomObject]@{Area=$Area;Setting=$Setting;Value="$Value";Risk=$Risk}) }
-# Run a check in isolation so a missing property never aborts the script
+# Invoke-Check: run one check in isolation. A property that is missing/unreadable on a given
+# farm logs a warning and is skipped, so a single failed read never aborts the remaining checks.
 function Invoke-Check { param([scriptblock]$Block,[string]$Name) try { & $Block } catch { Write-Log "Check '$Name' failed: $($_.Exception.Message)" WARN } }
 
 $site=$null
 try {
     if ($LogFile){ try { Start-Transcript -Path $LogFile -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Transcript off: $($_.Exception.Message)" WARN } }
     Initialize-SPSnapin
+    # Start/Stop-SPAssignment bracket the SPSite object opened further below so its unmanaged
+    # memory is released deterministically at the end. Memory management only - no farm change.
     Start-SPAssignment -Global | Out-Null
 
     Invoke-Check -Name 'Farm' -Block {
@@ -49,6 +64,18 @@ try {
     }
 
     $webApps = if ($WebAppUrl){ Get-SPWebApplication $WebAppUrl -ErrorAction Stop } else { Get-SPWebApplication -ErrorAction Stop }
+    # --- Per web-application security settings ---
+    # Each Invoke-Check below reads one setting and records it via Add-F, attaching a Risk
+    # note only when the value is a concern. Briefly, the checks are:
+    #   Claims  - classic-mode (non-claims) auth is deprecated/insecure
+    #   SSC     - self-service site creation lets any user create site collections
+    #   BFH     - BrowserFileHandling=Permissive renders uploads inline (XSS/script risk)
+    #   FD      - an over-long form-digest timeout weakens CSRF protection
+    #   Blocked - informational list of blocked upload extensions
+    #   Anon    - anonymous access enabled on any IIS zone of the web app
+    #   TLS     - any zone URL served over plain HTTP (credentials/data in clear)
+    #   Policy  - web-app-wide policies granting Full Control/Read across every site collection
+    #   Super   - the portal super user/reader accounts used by the output cache
     foreach ($wa in $webApps){
         $u=$wa.Url
         Write-Log "Web application: $u" VERBOSE
@@ -64,6 +91,12 @@ try {
     }
 
     if ($SiteUrl){
+        # --- Per site-collection security settings (only if -SiteUrl was supplied) ---
+        #   Audit         - AuditFlags=None means script 9 will have no history to read
+        #   Admins        - the full list of site-collection administrators to eyeball
+        #   Lockdown      - ViewFormPagesLockDown feature state (matters when anon is on)
+        #   UserSolutions - sandboxed custom code packages (review trust/source)
+        #   PermLevels    - permission levels that grant high-impact rights (ManageWeb, etc.)
         Write-Log "Site collection: $SiteUrl" VERBOSE
         $site=Get-SPSite $SiteUrl -ErrorAction Stop
         Invoke-Check -Name 'Audit' -Block { $f=$site.Audit.AuditFlags; Add-F 'Site' 'AuditFlags' $f ($(if ("$f" -eq 'None'){'No auditing configured'}else{''})); Add-F 'Site' 'AuditLogTrimmingRetention(days)' $site.Audit.AuditLogTrimmingRetention '' }

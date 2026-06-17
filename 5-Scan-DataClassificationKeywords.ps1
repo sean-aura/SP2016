@@ -63,15 +63,26 @@ param(
     [string]$LogFile
 )
 
+# ErrorActionPreference=Continue: a failed read on one item/list is logged and skipped
+# rather than aborting the whole run. $script:Errors tallies those non-fatal skips.
 $ErrorActionPreference='Continue'; $script:Errors=0; $script:Start=Get-Date
+# --- Shared helpers (identical across every script in this toolkit) ---
+# Write-Log: timestamped, leveled console output. Level 'ERROR' also increments the
+# non-fatal error counter shown in the final summary; 'VERBOSE' prints only with -Verbose.
 function Write-Log { param([string]$Message,[ValidateSet('INFO','OK','WARN','ERROR','VERBOSE')][string]$Level='INFO')
     $ts=(Get-Date).ToString('HH:mm:ss')
     switch ($Level){'VERBOSE'{Write-Verbose "[$ts] $Message"}'WARN'{Write-Warning "[$ts] $Message"}'ERROR'{Write-Host "[$ts] ERROR: $Message" -ForegroundColor Red;$script:Errors++}'OK'{Write-Host "[$ts] $Message" -ForegroundColor Green}default{Write-Host "[$ts] $Message" -ForegroundColor Cyan}} }
+# Initialize-SPSnapin: makes the SharePoint server-side cmdlets available by loading the
+# Microsoft.SharePoint.PowerShell snap-in if it is not already loaded (it is pre-loaded in
+# the SharePoint 2016 Management Shell). Loading a snap-in is read-only - it only exposes
+# cmdlets to the session, it does not alter the farm.
 function Initialize-SPSnapin {
     if (Get-Command Get-SPSite -ErrorAction SilentlyContinue){return}
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
+# $kwPattern: a single regex OR-ing every keyword, each wrapped in negative lookaround so it
+# matches as a whole token. See the boundary notes immediately below for why \b is not used.
 $kwPattern = ($Keywords | ForEach-Object { '(?<![A-Za-z0-9])' + [regex]::Escape($_) + '(?![A-Za-z0-9])' }) -join '|'
 # Boundary notes:
 # Several NZ classification keywords (STAFF, BUDGET, SECRET, MEDICAL, COMMERCIAL, EVALUATIVE) are
@@ -90,6 +101,8 @@ $kwPattern = ($Keywords | ForEach-Object { '(?<![A-Za-z0-9])' + [regex]::Escape(
 # a Luhn check would reduce false positives but adds significant complexity.
 # Both patterns run on file names and metadata only, not file contents.
 $dataRegex = @{ 'SSN' = '\b\d{3}-\d{2}-\d{4}\b'; 'CardNumber' = '\b(?:\d[ -]?){13,16}\b' }
+# Get-PatternHits: returns the list of hit types found in $text - 'keyword' for any classification
+# keyword match, plus 'SSN'/'CardNumber' when -DataPatterns is set. Returns an empty array on no hit.
 function Get-PatternHits { param([string]$text)
     $hits=@()
     if ($text -and $text -match $kwPattern){ $hits += 'keyword' }
@@ -102,11 +115,18 @@ $site=$null
 try {
     if ($LogFile){ try { Start-Transcript -Path $LogFile -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Transcript off: $($_.Exception.Message)" WARN } }
     Initialize-SPSnapin
+    # Start/Stop-SPAssignment bracket the SPSite/SPWeb objects opened below so their
+    # unmanaged memory is released deterministically at the end. Memory management only -
+    # the recycle-bin enumeration and Search query used here are both read-only.
     Start-SPAssignment -Global | Out-Null
     Write-Log "Opening site collection: $SiteUrl"
     $site=Get-SPSite $SiteUrl -ErrorAction Stop
 
     if ($UseSearch){
+        # PATH A - full-text via the Search service: sends the keywords as a KQL OR query, which
+        # searches inside document contents (needs a running Search service and a completed crawl).
+        # Results are paged in blocks of $pageSize. Search does its own word-based matching, so the
+        # $kwPattern boundary logic does not apply here.
         Write-Log "Running full-text Search query (paged)..."
         try {
             $queryText=($Keywords | ForEach-Object { '"'+$_+'"' }) -join ' OR '
@@ -135,6 +155,9 @@ try {
         } catch { Write-Log "Search query failed (is the Search service running/crawled?): $($_.Exception.Message)" WARN }
     }
     else {
+        # PATH B - metadata scan (default): walks every web/list and tests each item's Name (and,
+        # with -ScanColumnValues, its non-hidden column values) against the patterns. This matches
+        # names + metadata only, never file contents - use -UseSearch (Path A) for content scanning.
         $webs=$site.AllWebs; $total=$webs.Count; Write-Log "Found $total web(s)."; $i=0
         foreach ($web in $webs){
             $i++
@@ -144,6 +167,9 @@ try {
                 foreach ($list in $web.Lists){
                     if ($list.Hidden){continue}
                     try {
+                        # Page through the list 2000 items at a time (RecursiveAll = files AND folders,
+                        # all sub-folders) so a large library is never loaded into memory all at once.
+                        # The loop advances via ListItemCollectionPosition until there are no more pages.
                         $q=New-Object Microsoft.SharePoint.SPQuery
                         $q.ViewAttributes="Scope='RecursiveAll'"
                         $q.RowLimit=2000

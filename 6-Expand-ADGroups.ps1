@@ -44,11 +44,20 @@ param(
     [switch]$NoRSAT
 )
 
+# ErrorActionPreference=Continue: a group that cannot be resolved is logged and recorded
+# with a note rather than aborting the run. $script:Errors tallies those non-fatal skips.
 $ErrorActionPreference='Continue'; $script:Errors=0; $script:Start=Get-Date
+# --- Shared helper (identical across every script in this toolkit) ---
+# Write-Log: timestamped, leveled console output. Level 'ERROR' also increments the
+# non-fatal error counter shown in the final summary; 'VERBOSE' prints only with -Verbose.
+# (This script does not load the SharePoint snap-in - it only reads a CSV and queries AD.)
 function Write-Log { param([string]$Message,[ValidateSet('INFO','OK','WARN','ERROR','VERBOSE')][string]$Level='INFO')
     $ts=(Get-Date).ToString('HH:mm:ss')
     switch ($Level){'VERBOSE'{Write-Verbose "[$ts] $Message"}'WARN'{Write-Warning "[$ts] $Message"}'ERROR'{Write-Host "[$ts] ERROR: $Message" -ForegroundColor Red;$script:Errors++}'OK'{Write-Host "[$ts] $Message" -ForegroundColor Green}default{Write-Host "[$ts] $Message" -ForegroundColor Cyan}} }
 
+# Resolve-Identity: reduce a SharePoint LoginName to the bare identity AD lookups expect.
+# Strips a claims prefix (everything up to and including '|'), returns a raw SID unchanged,
+# and for DOMAIN\sam returns just the sAMAccountName portion.
 function Resolve-Identity { param([string]$login)
     $s=$login
     if ($s -match '\|'){ $s=$s.Substring($s.IndexOf('|')+1) }
@@ -120,10 +129,13 @@ try {
     }
 
     $rows = Import-Csv $InputCsv
+    # Keep only the AD-group rows from script 1/2's CSV - those are the principals to expand.
     $adRows = $rows | Where-Object { $_.IsADGroup -eq 'True' -or $_.PrincipalType -eq 'ADGroup' }
     Write-Log "Found $($adRows.Count) AD-group row(s) to expand."
     if (-not $adRows){ Write-Log "Nothing to expand." OK; return }
 
+    # $cache keyed by LoginName: the same AD group can grant access at many objects, so resolve
+    # each group's membership once and reuse it for every row that references it.
     $cache=@{}; $n=0; $tot=$adRows.Count
     foreach ($r in $adRows){
         $n++
@@ -149,6 +161,9 @@ try {
             $cache[$key]=$members
         }
         foreach ($m in $cache[$key]){
+            # Emit one output row per (group -> member). -NoRSAT already carries Enabled/DisplayName/
+            # Sam from the LDAP query; RSAT mode does a follow-up Get-ADUser to fill those in. A member
+            # whose account is disabled but still inside the group is flagged in the Note column.
             if ($NoRSAT) {
                 # ADSI path already resolved DisplayName/SamAccountName/Enabled directly - no extra lookup needed.
                 $enabled=$m.Enabled; $display=$m.DisplayName; $sam=$m.SamAccountName

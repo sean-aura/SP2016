@@ -21,10 +21,19 @@ param(
     [string]$LogFile
 )
 
+# ErrorActionPreference=Continue: a failed read on one list is logged and skipped
+# rather than aborting the whole run. $script:Errors tallies those non-fatal skips.
 $ErrorActionPreference='Continue'; $script:Errors=0; $script:Start=Get-Date
+# --- Shared helpers (identical across every script in this toolkit) ---
+# Write-Log: timestamped, leveled console output. Level 'ERROR' also increments the
+# non-fatal error counter shown in the final summary; 'VERBOSE' prints only with -Verbose.
 function Write-Log { param([string]$Message,[ValidateSet('INFO','OK','WARN','ERROR','VERBOSE')][string]$Level='INFO')
     $ts=(Get-Date).ToString('HH:mm:ss')
     switch ($Level){'VERBOSE'{Write-Verbose "[$ts] $Message"}'WARN'{Write-Warning "[$ts] $Message"}'ERROR'{Write-Host "[$ts] ERROR: $Message" -ForegroundColor Red;$script:Errors++}'OK'{Write-Host "[$ts] $Message" -ForegroundColor Green}default{Write-Host "[$ts] $Message" -ForegroundColor Cyan}} }
+# Initialize-SPSnapin: makes the SharePoint server-side cmdlets available by loading the
+# Microsoft.SharePoint.PowerShell snap-in if it is not already loaded (it is pre-loaded in
+# the SharePoint 2016 Management Shell). Loading a snap-in is read-only - it only exposes
+# cmdlets to the session, it does not alter the farm.
 function Initialize-SPSnapin {
     if (Get-Command Get-SPSite -ErrorAction SilentlyContinue){return}
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
@@ -35,6 +44,9 @@ $site=$null
 try {
     if ($LogFile){ try { Start-Transcript -Path $LogFile -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Transcript off: $($_.Exception.Message)" WARN } }
     Initialize-SPSnapin
+    # Start/Stop-SPAssignment bracket the SPSite/SPWeb objects opened below so their
+    # unmanaged memory is released deterministically at the end. This is object-lifetime
+    # (memory) management only - it makes no change to SharePoint content or configuration.
     Start-SPAssignment -Global | Out-Null
     Write-Log "Opening site collection: $SiteUrl"
     $site=Get-SPSite $SiteUrl -ErrorAction Stop
@@ -47,6 +59,11 @@ try {
             foreach ($list in $web.Lists){
                 if ($list.Hidden){continue}
                 try {
+                    # DraftLeakRisk: minor (draft) versions are enabled AND draft visibility is
+                    # 'Reader', meaning any reader can see unapproved/in-progress drafts - the
+                    # common "private edits are actually public" misconfiguration. The row below
+                    # captures every versioning/approval/item-security setting that governs who
+                    # can see or edit content across its version history, one row per list.
                     $draftLeak = ($list.EnableMinorVersions -and "$($list.DraftVisibilityType)" -eq 'Reader')
                     $results.Add([PSCustomObject]@{
                         WebUrl=$web.Url; List=$list.Title; Url=$list.RootFolder.ServerRelativeUrl; Type=$list.BaseType

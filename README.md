@@ -4,6 +4,15 @@ Read-only PowerShell scripts to audit a SharePoint **2016 on-premises** farm
 from a security standpoint. Each writes a CSV. Built on the native
 `Microsoft.SharePoint.PowerShell` snap-in (server-side object model).
 
+> **Code style & runtime.** All ten scripts are inline-commented to the same standard.
+> Script 1 is laid out line-by-line as the readable reference; scripts 2–10 keep their
+> compact one-line-per-block layout but carry explanatory comments above each non-obvious
+> block — the shared helpers (`Write-Log`, `Initialize-SPSnapin`), the read-only
+> `Start-SPAssignment`/`Stop-SPAssignment` object-lifetime handling, and the logic
+> specific to each audit. The scripts target the **SharePoint 2016 Management Shell
+> (Windows PowerShell 5)**; they use `[PSCustomObject]`/`[ordered]` and so are not
+> intended to run under a literal PowerShell 2.0 engine.
+
 ## READ-ONLY — by design
 Every script performs **only** `Get-*` cmdlets, property reads, and read-only
 methods (`DoesUserHavePermissions`, `SPAudit.GetEntries`, Search `ExecuteQuery`,

@@ -21,15 +21,29 @@ param(
     [string]$LogFile
 )
 
+# ErrorActionPreference=Continue: a failed read on one object is logged and skipped
+# rather than aborting the whole run. $script:Errors tallies those non-fatal skips.
 $ErrorActionPreference='Continue'; $script:Errors=0; $script:Start=Get-Date
+# --- Shared helpers (identical across every script in this toolkit) ---
+# Write-Log: timestamped, leveled console output. Level 'ERROR' also increments the
+# non-fatal error counter shown in the final summary; 'VERBOSE' prints only with -Verbose.
 function Write-Log { param([string]$Message,[ValidateSet('INFO','OK','WARN','ERROR','VERBOSE')][string]$Level='INFO')
     $ts=(Get-Date).ToString('HH:mm:ss')
     switch ($Level){'VERBOSE'{Write-Verbose "[$ts] $Message"}'WARN'{Write-Warning "[$ts] $Message"}'ERROR'{Write-Host "[$ts] ERROR: $Message" -ForegroundColor Red;$script:Errors++}'OK'{Write-Host "[$ts] $Message" -ForegroundColor Green}default{Write-Host "[$ts] $Message" -ForegroundColor Cyan}} }
+# Initialize-SPSnapin: makes the SharePoint server-side cmdlets available by loading the
+# Microsoft.SharePoint.PowerShell snap-in if it is not already loaded (it is pre-loaded in
+# the SharePoint 2016 Management Shell). Loading a snap-in is read-only - it only exposes
+# cmdlets to the session, it does not alter the farm.
 function Initialize-SPSnapin {
     if (Get-Command Get-SPSite -ErrorAction SilentlyContinue){return}
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
+# $broadPatterns: claim-string / display-name fragments that identify "broad" principals -
+# grants that effectively open content to large populations (Everyone, all authenticated
+# users, every domain user, etc.). Keys are friendly labels; values are the lower-cased
+# claim-string fragments matched against a member's LoginName. These target Windows-claims
+# format; add entries for any custom trusted identity providers in your environment.
 $broadPatterns = [ordered]@{
     'Everyone'                    = 'c:0(.s|true'
     'All Authenticated (Windows)' = 'c:0!.s|windows'
@@ -38,6 +52,8 @@ $broadPatterns = [ordered]@{
     'Everyone except external'    = 'spo-grid-all-users'
     'Domain Users'                = 'domain users'
 }
+# Get-BroadFlag: returns the matching broad-principal label (or $null) for a given
+# login/display name. Matches the claim fragment against LoginName OR the label against Name.
 function Get-BroadFlag {
     param([string]$login,[string]$name)
     $l=("$login").ToLower(); $n=("$name").ToLower()
@@ -45,6 +61,9 @@ function Get-BroadFlag {
     return $null
 }
 $results = New-Object System.Collections.Generic.List[object]
+# Add-BroadFindings: scans a securable's role assignments and records one finding per
+# broad principal that holds a real permission level (Limited Access / empty is ignored,
+# as it is just SharePoint's plumbing for traversal, not an actual grant).
 function Add-BroadFindings {
     param($Securable,[string]$Scope,[string]$ObjectUrl,[string]$WebUrl)
     foreach ($ra in $Securable.RoleAssignments){
@@ -60,6 +79,9 @@ $site=$null
 try {
     if ($LogFile){ try { Start-Transcript -Path $LogFile -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Transcript off: $($_.Exception.Message)" WARN } }
     Initialize-SPSnapin
+    # Start/Stop-SPAssignment bracket the SPSite/SPWeb objects opened below so their
+    # unmanaged memory is released deterministically at the end. This is object-lifetime
+    # (memory) management only - it makes no change to SharePoint content or configuration.
     Start-SPAssignment -Global | Out-Null
     Write-Log "Opening site collection: $SiteUrl"
     $site=Get-SPSite $SiteUrl -ErrorAction Stop
@@ -69,6 +91,8 @@ try {
         try {
             Write-Progress -Activity "External/anonymous audit" -Status $web.Url -PercentComplete (($i/$total)*100)
             Write-Log "Web $i/$total : $($web.Url)" VERBOSE
+            # Web-level exposure: anonymous access turned on for this web, and whether
+            # access requests are routed somewhere (the email implies the feature is on).
             if ("$($web.AnonymousState)" -ne 'Disabled'){
                 $results.Add([PSCustomObject]@{Finding='AnonymousAccess';Detail=$web.AnonymousState;Scope='Web';ObjectUrl=$web.Url;WebUrl=$web.Url;Principal='(anonymous)';LoginName='';Permissions="AnonymousState=$($web.AnonymousState)"})
             }

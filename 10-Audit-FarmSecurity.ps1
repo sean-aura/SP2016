@@ -28,24 +28,41 @@ param(
     [string]$LogFile
 )
 
+# ErrorActionPreference=Continue: a failed section is logged and skipped rather than aborting
+# the whole run. $script:Errors tallies those non-fatal skips.
 $ErrorActionPreference='Continue'; $script:Errors=0; $script:Start=Get-Date
+# --- Shared helpers (identical across every script in this toolkit) ---
+# Write-Log: timestamped, leveled console output. Level 'ERROR' also increments the
+# non-fatal error counter shown in the final summary; 'VERBOSE' prints only with -Verbose.
 function Write-Log { param([string]$Message,[ValidateSet('INFO','OK','WARN','ERROR','VERBOSE')][string]$Level='INFO')
     $ts=(Get-Date).ToString('HH:mm:ss')
     switch ($Level){'VERBOSE'{Write-Verbose "[$ts] $Message"}'WARN'{Write-Warning "[$ts] $Message"}'ERROR'{Write-Host "[$ts] ERROR: $Message" -ForegroundColor Red;$script:Errors++}'OK'{Write-Host "[$ts] $Message" -ForegroundColor Green}default{Write-Host "[$ts] $Message" -ForegroundColor Cyan}} }
+# Initialize-SPSnapin: makes the SharePoint server-side cmdlets available by loading the
+# Microsoft.SharePoint.PowerShell snap-in if it is not already loaded (it is pre-loaded in
+# the SharePoint 2016 Management Shell). Loading a snap-in is read-only - it only exposes
+# cmdlets to the session, it does not alter the farm.
 function Initialize-SPSnapin {
     if (Get-Command Get-SPSite -ErrorAction SilentlyContinue){return}
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
 $rows=New-Object System.Collections.Generic.List[object]
+# Add-R: append one output row (Area/Name/Detail/Risk); $Risk is blank for informational rows.
 function Add-R { param($Area,$Name,$Detail,$Risk='') $rows.Add([PSCustomObject]@{Area=$Area;Name=$Name;Detail="$Detail";Risk=$Risk}) }
+# Invoke-Block: run one named section in isolation so an unprovisioned/missing service is recorded
+# as an Error row and logged, not fatal - the remaining sections still run.
 function Invoke-Block { param([string]$Name,[scriptblock]$Block) Write-Log "Section: $Name" VERBOSE; try { & $Block } catch { Write-Log "Section '$Name' failed: $($_.Exception.Message)" WARN; Add-R $Name 'Error' $_.Exception.Message '' } }
 
 try {
     if ($LogFile){ try { Start-Transcript -Path $LogFile -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Transcript off: $($_.Exception.Message)" WARN } }
     Initialize-SPSnapin
+    # Start/Stop-SPAssignment bracket the SPSite objects opened by the sections below so their
+    # unmanaged memory is released; each section also disposes its own sites. Memory management only.
     Start-SPAssignment -Global | Out-Null
 
+    # Footprint: enumerate every web application, its content databases, and its site collections,
+    # so the audit scope is the whole farm and nothing is silently out of scope. Each site is
+    # disposed immediately after its row is written to keep memory flat on large farms.
     Invoke-Block 'Footprint' {
         foreach ($wa in Get-SPWebApplication -ErrorAction Stop){
             $sites=Get-SPSite -WebApplication $wa -Limit All -ErrorAction SilentlyContinue
@@ -76,6 +93,9 @@ try {
     }
 
     Invoke-Block 'SecureStore' {
+        # Secure Store needs a service context tied to a real content site. Use -ContextSiteUrl if
+        # given, otherwise fall back to the Central Admin site. This lists target-application
+        # metadata (id + type) ONLY - it never reads or decrypts the stored credentials themselves.
         $ctxSite=$null
         if ($ContextSiteUrl){ $ctxSite=Get-SPSite $ContextSiteUrl -ErrorAction Stop }
         else {
