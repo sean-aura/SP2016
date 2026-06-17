@@ -37,7 +37,7 @@ function Initialize-SPSnapin {
     if (-not (Get-PSSnapin -Registered -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue)){throw "SharePoint snap-in not registered. Run in the SharePoint 2016 Management Shell."}
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
-$securityEvents=@('SecGroupCreate','SecGroupDelete','SecGroupMemberAdd','SecGroupMemberDel','SecRoleDefCreate','SecRoleDefModify','SecRoleDefDelete','SecRoleBindBreakInherit','SecRoleBindInherit','SecRoleBindUpdate','AuditMaskChange','Delete','Undelete','Move','Copy')
+$securityEvents=@('SecGroupCreate','SecGroupDelete','SecGroupMemberAdd','SecGroupMemberDel','SecRoleDefCreate','SecRoleDefModify','SecRoleDefDelete','SecRoleDefBreakInherit','SecRoleBindBreakInherit','SecRoleBindInherit','SecRoleBindUpdate','AuditMaskChange','EventsDeleted','Delete','Undelete','Move','Copy')
 
 $results=New-Object System.Collections.Generic.List[object]
 $userCache=@{}
@@ -66,6 +66,7 @@ try {
     $entries=$null
     try { $entries=$site.Audit.GetEntries($query) }
     catch { throw "GetEntries failed (try a smaller -Days window): $($_.Exception.Message)" }
+    if ($null -eq $entries){ throw "GetEntries returned null - audit log may be unavailable on this site." }
     Write-Log "Retrieved $($entries.Count) raw entries; filtering..." VERBOSE
     if ($MaxEntries -gt 0 -and $entries.Count -ge $MaxEntries){
         Write-Log "WARNING: Entry count ($($entries.Count)) has hit -MaxEntries cap ($MaxEntries). Results are TRUNCATED - use a shorter -Days window or raise -MaxEntries." WARN

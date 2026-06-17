@@ -41,6 +41,7 @@ $site=$null
 try {
     if ($LogFile){ try { Start-Transcript -Path $LogFile -Append -ErrorAction Stop | Out-Null } catch { Write-Log "Transcript off: $($_.Exception.Message)" WARN } }
     Initialize-SPSnapin
+    Start-SPAssignment -Global | Out-Null
 
     Invoke-Check -Name 'Farm' -Block {
         $farm = Get-SPFarm -ErrorAction Stop
@@ -67,7 +68,15 @@ try {
         $site=Get-SPSite $SiteUrl -ErrorAction Stop
         Invoke-Check -Name 'Audit' -Block { $f=$site.Audit.AuditFlags; Add-F 'Site' 'AuditFlags' $f ($(if ("$f" -eq 'None'){'No auditing configured'}else{''})); Add-F 'Site' 'AuditLogTrimmingRetention(days)' $site.Audit.AuditLogTrimmingRetention '' }
         Invoke-Check -Name 'Admins' -Block { Add-F 'Site' 'SiteCollectionAdministrators' (($site.RootWeb.SiteAdministrators | ForEach-Object {$_.LoginName}) -join '; ') 'Confirm every entry is expected' }
-        Invoke-Check -Name 'Lockdown' -Block { $on=$null -ne $site.Features[[Guid]'7c637b23-06c4-472d-9a9a-7c175762c5c4']; Add-F 'Site' 'ViewFormPagesLockDown' $on ($(if (-not $on){'Lockdown off - relevant if anonymous access is enabled'}else{''})) }
+        Invoke-Check -Name 'Lockdown' -Block {
+            # SP2016 GUID for ViewFormPagesLockDown (Limited-access user permission lockdown mode) site feature.
+            # Prevents anonymous/limited-access users from accessing /_layouts application pages.
+            # Confirmed SP2016 GUID: 7c637b23-06c4-472d-9a9a-7c175762c5c4 (Scope=Site)
+            # Source: https://vitalyzhukov.com/en/resources/features-sp2016/7c637b23-06c4-472d-9a9a-7c175762c5c4
+            # To verify on your farm: Get-SPFeature -Site <url> | Where-Object { $_.DisplayName -like '*Lockdown*' }
+            $on = $null -ne $site.Features[[Guid]'7c637b23-06c4-472d-9a9a-7c175762c5c4']
+            Add-F 'Site' 'ViewFormPagesLockDown' $on ($(if (-not $on){'Lockdown off - relevant if anonymous access is enabled'}else{''}))
+        }
         Invoke-Check -Name 'UserSolutions' -Block { foreach ($us in (Get-SPUserSolution -Site $site -ErrorAction SilentlyContinue)){ Add-F 'UserSolution' $us.Name "Status=$($us.Status)" 'Sandboxed custom code - review trust/source' } }
         Invoke-Check -Name 'PermLevels' -Block {
             foreach ($rd in $site.RootWeb.RoleDefinitions){
@@ -85,6 +94,7 @@ try {
 catch { Write-Log "FATAL: $($_.Exception.Message)" ERROR; Write-Log "At: $($_.InvocationInfo.PositionMessage)" ERROR; Write-Verbose $_.ScriptStackTrace }
 finally {
     if ($site){ try {$site.Dispose()} catch {} }
+    try { Stop-SPAssignment -Global | Out-Null } catch {}
     Write-Log ("Done in {0:n1}s with {1} non-fatal error(s)." -f ((Get-Date)-$script:Start).TotalSeconds,$script:Errors)
     if ($LogFile){ try { Stop-Transcript | Out-Null } catch {} }
 }

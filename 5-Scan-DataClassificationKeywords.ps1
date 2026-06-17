@@ -44,6 +44,11 @@ function Initialize-SPSnapin {
     Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop }
 
 $kwPattern = ($Keywords | ForEach-Object { [regex]::Escape($_) }) -join '|'
+# Pattern notes:
+# SSN regex matches NNN-NN-NNNN - may produce false positives (phone extensions, dates, etc.)
+# CardNumber regex matches 13-16 digits with optional spaces/dashes - intentionally broad;
+# a Luhn check would reduce false positives but adds significant complexity.
+# Both patterns run on file names and metadata only, not file contents.
 $dataRegex = @{ 'SSN' = '\b\d{3}-\d{2}-\d{4}\b'; 'CardNumber' = '\b(?:\d[ -]?){13,16}\b' }
 function Get-PatternHits { param([string]$text)
     $hits=@()
@@ -72,7 +77,16 @@ try {
                 $kq.QueryText=$queryText; $kq.RowLimit=$pageSize; $kq.StartRow=$startRow; $kq.TrimDuplicates=$false
                 'Title','Path','Author','LastModifiedTime' | ForEach-Object { [void]$kq.SelectProperties.Add($_) }
                 $rel=$exec.ExecuteQuery($kq).Item([Microsoft.Office.Server.Search.Query.ResultType]::RelevantResults)
-                if ($startRow -eq 0){ $totalRows=[int]$rel.TotalRows; Write-Log "Search: $totalRows total result(s)." VERBOSE }
+                if ($startRow -eq 0){
+                    $totalRows=[int]$rel.TotalRows
+                    Write-Log "Search: $totalRows total result(s) reported by Search." VERBOSE
+                    # NOTE: SP2016 Search may cap TotalRows at the ResultsProvider limit (often 500-1000).
+                    # If TotalRows equals a round number like 500, the actual corpus may be larger.
+                    # Use metadata scan (without -UseSearch) for exhaustive coverage.
+                    if ($totalRows -eq 500 -or $totalRows -eq 1000){
+                        Write-Log "TotalRows=$totalRows may be a Search service cap - results could be truncated. Consider metadata scan for full coverage." WARN
+                    }
+                }
                 foreach ($row in $rel.Table.Rows){
                     $results.Add([PSCustomObject]@{Source='Search';List='';ItemUrl=$row['Path'];Title=$row['Title'];LastModified=$row['LastModifiedTime'];Stale='';UniquePerms='';Matches="full-text: $queryText"})
                 }

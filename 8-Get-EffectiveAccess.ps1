@@ -75,7 +75,7 @@ try {
     if (Get-Module -ListAvailable -Name ActiveDirectory){
         Import-Module ActiveDirectory -ErrorAction Stop
         try {
-            $g = Get-ADAccountAuthorizationGroups -Identity $sam -ErrorAction Stop
+            $g = Get-ADAccountAuthorizationGroup -Identity $sam -ErrorAction Stop
             foreach ($x in $g){ if ($x.SamAccountName){[void]$idset.Add($x.SamAccountName.ToLower())}; if ($x.SID){[void]$idset.Add($x.SID.Value.ToLower())} }
             Write-Log "Resolved $($g.Count) AD group(s) for $sam." VERBOSE
         } catch { Write-Log "AD group resolution failed for '$sam': $($_.Exception.Message)" WARN }

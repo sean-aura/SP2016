@@ -86,6 +86,29 @@ required given the code is read-only, but reasonable for a formal audit.
 | `-ContextSiteUrl <url>` | CA site | Site used to establish the Secure Store service context |
 | `-IncludeAddins` | off | Farm-wide add-in scan (crawls every web — slow) |
 
+## Before you run
+
+**Check execution policy first**
+Scripts will fail silently or with a cryptic error if execution policy blocks them. In an elevated SharePoint 2016 Management Shell:
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope Process
+```
+
+**Run script 4 before script 9**
+Script 4 reports the site's `AuditFlags`. If that comes back as `None`, script 9's output will be empty for the entire historical window — there is nothing to retroactively recover. Check auditing is enabled and allow at least one audit cycle before running script 9.
+
+**Script 6 depends on what script 1 captured**
+Script 6 expands AD groups found in script 1's CSV. If script 1 was run without `-IncludeFolders` or `-IncludeItems`, any AD group with access only at folder or item level will not appear in the CSV and script 6 will not expand it. Run script 1 with the broadest scope your time budget allows before handing off to script 6.
+
+**Script 8 is an approximation**
+It resolves the target account's group memberships via a global catalog query at the time of the run. Access granted through claim providers other than Windows claims will not be reflected. Treat the output as "likely access" and verify manually for any custom claim provider environments.
+
+**Item scan defaults are unlimited**
+Scripts 1, 5, and 8 default to scanning every item in every list (`-ItemScanLimitPerList 0`). On large document libraries this can run for hours and consume significant memory. For a first run on an unknown farm use `-ItemScanLimitPerList 5000` as a safe starting point, then remove the cap once you know the volume.
+
+**The output CSVs are sensitive**
+The combined output of scripts 1, 2, 5, and 8 is a complete map of where sensitive data lives and who can reach it. Treat the files like credentials: encrypt at rest, do not transmit unprotected, and delete them when the audit is complete.
+
 ## Suggested run order
 
 ```powershell
@@ -156,17 +179,27 @@ can reach it — to an attacker that's a target list. Store and transmit them
 accordingly (encrypt at rest, restrict access, delete when done).
 
 ## Known approximations / manual follow-ups
-- Script 8 computes effective access from the user's resolved principal set; it
-  approximates the platform's claims check — verify custom claim providers.
-- Claim-string matching (scripts 2, 7, 8) is heuristic; add patterns for any
-  custom trusted identity providers.
-- SharePoint Designer settings and TLS/cipher (Schannel) hardening are not in
-  the SP object model in a reliable way — review those in Central Admin / IIS.
-- Regex data-pattern matching (script 5) runs on names/metadata, not file
-  contents; use `-UseSearch` for keywords inside documents (needs a crawl).
-- Script 5 `-UseSearch` pages automatically through all search results; each
-  page is a new `KeywordQuery` call so avoid very broad keyword lists on large
-  farms (use the narrowest useful keyword set).
+
+**Claims and identity**
+- `IsDomainGroup` (scripts 1, 7) is set by the Windows claims provider. Custom claim providers may not populate it, so AD group detection can be incomplete in non-standard auth configurations.
+- Claim-string matching in `$broadPatterns` / `$skip` / `$idset` (scripts 2, 7, 8) targets Windows claims format (`i:0#.w|`, `c:0(.s|true`, etc.). Add patterns for any custom trusted identity providers in your environment.
+- Script 8 computes effective access from the user's resolved principal set; it approximates the platform's claims evaluation — verify results for environments using custom claim providers.
+- `-ExpandGroups` in script 1 expands SP group members one level only (uses `SPGroup.Users`). Nested SP groups within a SP group are not recursively expanded. AD groups within SP groups are handled by script 6 (`-Recursive`).
+
+**Feature GUIDs**
+- The `ViewFormPagesLockDown` GUID (`7c637b23-06c4-472d-9a9a-7c175762c5c4`) in script 4 is the standard SP2016 value (Scope=Site, confirmed against the SP2016 feature manifest). Verify on your farm: `Get-SPFeature -Site <url> | Where-Object { $_.DisplayName -like '*Lockdown*' }`. If the feature has a different GUID in your farm's feature store (e.g. from a non-standard deployment), update the GUID in `4-Audit-Configuration.ps1`.
+
+**Data pattern matching (script 5)**
+- SSN regex (`\d{3}-\d{2}-\d{4}`) and card-number regex (13–16 digits with optional separators) match on file names and metadata only, not file contents — use `-UseSearch` for content-level scanning.
+- Both patterns can produce false positives: the SSN pattern matches any NNN-NN-NNNN number (dates, phone extensions, item codes); the card pattern is intentionally broad and has no Luhn validation.
+- `-UseSearch` pages through all Search results automatically, but `TotalRows` from the Search service may be capped at a round number (500 or 1000) by the Results Provider. The script logs a warning if this is detected. For exhaustive coverage use the metadata scan (without `-UseSearch`).
+
+**Configuration and hardening**
+- SharePoint Designer settings and TLS/cipher (Schannel) hardening are not reliably accessible via the SP object model — review those in Central Admin and IIS Manager / Registry directly.
+- Script 9 (`GetEntries`) loads the entire date-range result set into memory before filtering. On busy farms with auditing heavily enabled and `-IncludeViews`, this can be large. Use `-Days` to narrow the window and `-MaxEntries` as a hard cap.
+
+**General**
+- All scripts produce point-in-time snapshots. Re-run and diff against a baseline (see Drift Detection section) to catch changes.
 
 ## Reference scripts
 - SharePoint Diary — SharePoint 2013/2016 Site Collection Permission Report:

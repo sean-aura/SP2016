@@ -55,7 +55,7 @@ function Initialize-SPSnapin {
 function Get-PrincipalType {
     param($member)
     if ($member -is [Microsoft.SharePoint.SPGroup]) { return 'SPGroup' }
-    elseif ($member.IsDomainGroup)                   { return 'ADGroup' }
+    elseif ($member.IsDomainGroup)                   { return 'ADGroup' }  # NOTE: IsDomainGroup is set by the Windows claims provider; custom claim providers may not set it reliably
     else                                             { return 'User/Claim' }
 }
 
@@ -75,6 +75,8 @@ function Add-RoleRows {
             PrincipalType=$ptype; IsADGroup=($ptype -eq 'ADGroup'); Permissions=$roles
         })
         if ($ExpandGroups -and $member -is [Microsoft.SharePoint.SPGroup]) {
+            # NOTE: SPGroup.Users is one level only - nested SP groups are not recursively expanded.
+            # AD groups within this SP group are expanded by 6-Expand-ADGroups.ps1.
             foreach ($u in $member.Users) {
                 $ut = Get-PrincipalType $u
                 $results.Add([PSCustomObject]@{
