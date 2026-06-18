@@ -93,22 +93,44 @@ try {
     }
 
     Invoke-Block 'SecureStore' {
-        # Secure Store needs a service context tied to a real content site. Use -ContextSiteUrl if
-        # given, otherwise fall back to the Central Admin site. This lists target-application
-        # metadata (id + type) ONLY - it never reads or decrypts the stored credentials themselves.
+        # Secure Store audit (READ-ONLY): lists target-application METADATA (id + type) only -
+        # it never reads or decrypts the stored credentials. The section validates its two
+        # prerequisites up front and reports clearly instead of ever prompting for input:
+        #   (1) a Secure Store service application must exist in the farm, and
+        #   (2) a service context is needed from a content site whose web application is
+        #       associated with the Secure Store proxy (the Central Admin site often is not).
+
+        # (1) Validate the service application exists. Many farms do not use Secure Store at all,
+        # so its absence is reported as Info (nothing to audit) rather than treated as an error.
+        $ssa = @(Get-SPServiceApplication -ErrorAction SilentlyContinue | Where-Object { $_.TypeName -match 'Secure Store' })
+        if ($ssa.Count -eq 0){ Add-R 'SecureStore' '(none)' 'No Secure Store service application is provisioned in this farm' 'Info - nothing to audit'; return }
+        foreach ($s in $ssa){ Add-R 'SecureStore' $s.DisplayName "ServiceApplication; Status=$($s.Status)" '' }
+
+        # (2) Resolve a service-context site. Prefer -ContextSiteUrl (a content site); otherwise
+        # fall back to the Central Admin site. Validate that it opens rather than letting a bad
+        # URL throw, and record a targeted hint if it does not.
         $ctxSite=$null
-        if ($ContextSiteUrl){ $ctxSite=Get-SPSite $ContextSiteUrl -ErrorAction Stop }
-        else {
+        if ($ContextSiteUrl){
+            $ctxSite=Get-SPSite $ContextSiteUrl -ErrorAction SilentlyContinue
+            if (-not $ctxSite){ Add-R 'SecureStore' '(context)' "ContextSiteUrl '$ContextSiteUrl' could not be opened" 'Check it is a real content site collection'; return }
+        } else {
             $ca=Get-SPWebApplication -IncludeCentralAdministration | Where-Object { $_.IsAdministrationWebApplication } | Select-Object -First 1
-            $ctxSite=Get-SPSite ($ca.Sites[0].Url) -ErrorAction Stop
+            if ($ca -and $ca.Sites.Count -gt 0){ $ctxSite=Get-SPSite ($ca.Sites[0].Url) -ErrorAction SilentlyContinue }
+            if (-not $ctxSite){ Add-R 'SecureStore' '(context)' 'No service-context site available (Central Admin fallback failed)' 'Re-run with -ContextSiteUrl pointing at a content site'; return }
         }
+
+        # (3) Enumerate target applications. ONLY the -All form is ever called - never a bare
+        # Get-SPSecureStoreApplication, whose mandatory -Name would otherwise trigger an
+        # interactive prompt. If -All fails, the context cannot see the Secure Store proxy:
+        # report it with a hint and move on (the run is never blocked waiting for input).
         try {
             $ctx=Get-SPServiceContext $ctxSite -ErrorAction Stop
-            $apps=$null
-            try { $apps=Get-SPSecureStoreApplication -ServiceContext $ctx -All -ErrorAction Stop }
-            catch { $apps=Get-SPSecureStoreApplication -ServiceContext $ctx -ErrorAction Stop }
-            foreach ($app in $apps){ Add-R 'SecureStore' $app.TargetApplication.ApplicationId "Type=$($app.TargetApplication.TargetApplicationType)" 'Credential vault entry - confirm who can use it' }
-        } finally { if ($ctxSite){ $ctxSite.Dispose() } }
+            $apps=@(Get-SPSecureStoreApplication -ServiceContext $ctx -All -ErrorAction Stop)
+            if ($apps.Count -eq 0){ Add-R 'SecureStore' '(none)' 'Secure Store reachable but no target applications are defined' 'Info' }
+            else { foreach ($app in $apps){ Add-R 'SecureStore' $app.TargetApplication.ApplicationId "Type=$($app.TargetApplication.TargetApplicationType)" 'Credential vault entry - confirm who can use it' } }
+        }
+        catch { Add-R 'SecureStore' '(unavailable)' "Secure Store not reachable from this context: $($_.Exception.Message)" 'Re-run with -ContextSiteUrl pointing at a content site in the default web app' }
+        finally { if ($ctxSite){ $ctxSite.Dispose() } }
     }
 
     if ($IncludeAddins){

@@ -110,6 +110,76 @@ Source: [NZ PSR Classification System](https://www.protectivesecurity.govt.nz/cl
 | `-IncludeItems` | off | Descend into items/folders with unique permissions |
 | `-ItemScanLimitPerList <n>` | 0 (unlimited) | Cap per list |
 
+#### Feeding a list of users from an existing CSV
+
+Script 8 checks **one** user per run, but you rarely want to type each login. The
+other scripts already emit the principals, so the simplest source of "users to audit"
+is a CSV you have already produced. Two rules apply to every example below: filter out
+group rows (script 8 models access *for a user*, so SharePoint/AD groups are not valid
+input), and de-duplicate (the same account appears on many rows). Each run is given its
+own output file built from the sanitised login, because a run overwrites its `-OutputCsv`.
+
+Set the site once for all examples:
+
+```powershell
+$site = "https://sharepoint.contoso.com"
+```
+
+**From script 1 — `SP_RBAC_Audit.csv` (every account that holds permissions).** The most
+complete population. `PrincipalType` is one of `User/Claim`, `SPGroup`, `ADGroup`; keep
+only the first. `LoginName` is already the claim string script 8 expects.
+
+```powershell
+Import-Csv .\SP_RBAC_Audit.csv |
+  Where-Object { $_.PrincipalType -eq 'User/Claim' } |
+  Select-Object -ExpandProperty LoginName |
+  Sort-Object -Unique |
+  ForEach-Object {
+    $safe = $_ -replace '[\\|:#]','_'
+    .\8-Get-EffectiveAccess.ps1 -SiteUrl $site -LoginName $_ -OutputCsv ".\EA_$safe.csv" -NoRSAT
+  }
+```
+
+**From script 7 — `SP_PrincipalHygiene.csv` (best for targeting).** Carries `IsDomainGroup`,
+`IsSiteAdmin`, and `PrincipalStatus` (`ACTIVE` / `DISABLED` / `ORPHANED`), so you can scope
+to just the accounts that matter instead of every user — usually the sane way to run this
+on a real farm. Example: site-collection admins only.
+
+```powershell
+Import-Csv .\SP_PrincipalHygiene.csv |
+  Where-Object { $_.IsDomainGroup -eq 'False' -and $_.IsSiteAdmin -eq 'True' } |
+  Select-Object -ExpandProperty LoginName |
+  Sort-Object -Unique |
+  ForEach-Object {
+    $safe = $_ -replace '[\\|:#]','_'
+    .\8-Get-EffectiveAccess.ps1 -SiteUrl $site -LoginName $_ -OutputCsv ".\EA_$safe.csv" -NoRSAT
+  }
+```
+
+Swap the filter to `$_.PrincipalStatus -eq 'DISABLED'` (or `'ORPHANED'`) to audit only the
+flagged accounts.
+
+**From script 6 — `SP_AD_Expanded.csv` (the real people inside AD groups).** These rows are
+already individual members; feed the `MemberSam` column (the bare sAMAccountName resolves fine).
+
+```powershell
+Import-Csv .\SP_AD_Expanded.csv |
+  Select-Object -ExpandProperty MemberSam |
+  Sort-Object -Unique |
+  ForEach-Object {
+    .\8-Get-EffectiveAccess.ps1 -SiteUrl $site -LoginName $_ -OutputCsv ".\EA_$_.csv" -NoRSAT
+  }
+```
+
+Afterwards, merge the per-user files into one for review:
+
+```powershell
+Import-Csv .\EA_*.csv | Export-Csv .\EA_All.csv -NoTypeInformation -Encoding UTF8
+```
+
+> Effective-access is expensive, especially with `-IncludeItems`. On a large farm prefer
+> the script 7 targeting approach (admins / disabled / orphaned) over auditing every principal.
+
 ### Script 9 — Audit Log
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
@@ -120,8 +190,15 @@ Source: [NZ PSR Classification System](https://www.protectivesecurity.govt.nz/cl
 ### Script 10 — Farm Security
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `-ContextSiteUrl <url>` | CA site | Site used to establish the Secure Store service context |
+| `-ContextSiteUrl <url>` | CA site (fallback) | Content-site URL used to establish the Secure Store service context. Recommended: a real content site in the default web app — the Central Admin fallback is often **not** associated with the Secure Store proxy |
 | `-IncludeAddins` | off | Farm-wide add-in scan (crawls every web — slow) |
+
+The Secure Store check validates its prerequisites and never prompts for input. If no
+Secure Store service application is provisioned, or the chosen context site cannot reach
+the Secure Store proxy, it writes a diagnostic row (with a hint) and continues rather than
+stopping. When it succeeds it records one row per service application (with `Status`) plus
+one row per target application. It lists target-application *metadata* only (id, type,
+status) — it never reads or decrypts stored credentials.
 
 ## Before you run
 
@@ -215,6 +292,9 @@ For busy farms, run script 9 with a narrower window first to gauge volume:
 | Script 6 `Could not expand` warnings | RSAT not installed, or group is in a different domain/trust | Install `RSAT-AD-PowerShell`, or run with `-NoRSAT` (no install needed); check forest trust if cross-domain |
 | Script 8 misses AD-group-based access | RSAT module missing | Install `RSAT-AD-PowerShell` on the farm server, or run with `-NoRSAT` (no install needed) |
 | `GetEntries failed` | Date range too large for available memory | Use `-Days 30` or narrower; consider running from a server with more RAM |
+| Script 10 Secure Store row shows `(unavailable)` or `(context)` | The context site cannot reach the Secure Store proxy (commonly the Central Admin fallback) | Re-run with `-ContextSiteUrl <content-site>` in the default web app |
+| Script 10 Secure Store row shows `(none)` "nothing to audit" | The farm has no Secure Store service application provisioned | Expected — no action needed; the section simply has nothing to list |
+| Script 10 prompts `Supply values for the following parameters: Name` | Old version's Secure Store fallback called a cmdlet with a mandatory `-Name` | Update to the current script — it validates and writes a diagnostic row instead of prompting |
 
 ## Drift detection (baseline + diff)
 These are point-in-time snapshots; the real value is re-running and diffing:
